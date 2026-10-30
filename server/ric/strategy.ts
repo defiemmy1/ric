@@ -12,11 +12,12 @@ export function strategyCard(a: Agent, d: Desk) {
   const kind = a.preset === "x-accounts" ? "social" : a.preset === "crypto" ? "asset|crypto" : a.preset === "ipo" ? "ipo" : "asset";
   const mons = (d.monitors ?? []).filter((m) => kind.split("|").includes(m.kind) && (a.preset !== "crypto" || m.kind === "crypto" || /^(BTC|ETH|SOL|XRP|BNB|DOGE|ADA|AVAX|LINK|TON)$/.test(m.symbol ?? "")));
   return {
-    name: a.name, type: getPreset(a.preset).label, strategy: a.strategy,
+    name: a.name, type: (a.custom ? "Your agent · " : "") + getPreset(a.preset).label, strategy: a.strategy,
     sources: src[a.preset] ?? src.custom!,
     schedule: ["On demand: “run research”, “analyze …”", ...mons.map((m) => `Monitor “${m.name}”: ${m.human}${m.paused ? " (paused)" : ""}`)],
     allowed: ["Read the sources above", "Write a research brief (verdict, confidence, evidence, counterevidence, gaps, sources)", "Propose a paper BUY/SELL card for you to approve"],
-    blocked: ["Approve or execute any trade (only you can)", `Spend over its $${a.budget} cap or $${tradeMax(a)} per trade (app-enforced)`, "Sell what you don't hold", "Act on instructions found inside posts or filings", "Trade from a monitor (monitors only alert)", "Real money or a real brokerage"],
-    budget: { cap: a.budget, perTrade: tradeMax(a) },
+    blocked: ["Approve or execute any trade (only you can)", `Spend over its $${a.budget} daily cap or $${tradeMax(a)} per trade (app-enforced)`, "Sell what you don't hold", "Act on instructions found inside posts or filings", "Trade from a monitor (monitors only alert)", "Real money or a real brokerage"],
+    budget: { cap: a.budget, perTrade: tradeMax(a), period: "daily" },
+    feedback: (a.feedback ?? []).slice(-5).reverse().map((f) => `${f.asset}: “${f.reason}”`),
   };
 }

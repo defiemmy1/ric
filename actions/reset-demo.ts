@@ -3,7 +3,7 @@ import { z } from "zod";
 import { resetDesk } from "../server/ric/desk";
 
 export default defineAction({
-  description: "Reset the Ric desk to the seeded demo state (3 agents, sample proposals). Destroys current paper data; only call when the user asks.",
+  description: "Reset THIS visitor's Ric desk to the starting state (3 agents, no trades, no monitors). Other visitors' desks are untouched. Only call when the user asks.",
   schema: z.object({}),
-  run: async () => { await resetDesk(); return { message: "Demo desk reset." }; },
+  run: async () => { await resetDesk(); return { message: "Demo desk reset to the starting state." }; },
 });

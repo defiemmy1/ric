@@ -281,3 +281,6 @@
 ::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--muted-foreground) / 0.34);
 }
+
+/* Demo deploy runs with AUTH_DISABLED on purpose (per-visitor desks); hide the framework notice. */
+[data-testid="runtime-config-notice"] { display: none !important; }

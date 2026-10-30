@@ -5,21 +5,31 @@ import { AsyncLocalStorage } from "node:async_hooks";
 const KEY_PREFIX = "ric:desk:v2:";
 const ownerStore = new AsyncLocalStorage<string>();
 /** Each signed-in user gets their own desk. CLI/tests use "local". */
-export const deskOwner = () => ownerStore.getStore() ?? getRequestUserEmail() ?? "local";
+export const visitorStore = new AsyncLocalStorage<string>();
+const SHARED_DEV = new Set(["dev@local.test", "dev@local"]);
+/** Desk owner: explicit owner (sweeps/tests) > real signed-in email > anonymous browser cookie > shared dev account > "local". */
+export function deskOwner() {
+  const o = ownerStore.getStore(); if (o) return o;
+  const email = getRequestUserEmail(); const vid = visitorStore.getStore();
+  if (email && !SHARED_DEV.has(email)) return email;
+  if (vid) return "visitor:" + vid;
+  return email ?? "local";
+}
 export const withOwner = <T>(owner: string, fn: () => Promise<T>) => ownerStore.run(owner, fn);
 export const DESK_PREFIX = KEY_PREFIX;
 const KEY_ = () => KEY_PREFIX + deskOwner();
 
-export type Agent = { id: string; name: string; preset: string; strategy: string; budget: number; maxPerTrade?: number | undefined; createdAt: string };
+export type Agent = { id: string; name: string; preset: string; strategy: string; budget: number; maxPerTrade?: number | undefined; createdAt: string; custom?: boolean; feedback?: { at: string; asset: string; reason: string }[] };
 export type Proposal = {
   id: string; agentId: string; asset: string; side: "buy" | "sell"; qty: number; price: number; cost: number; estFill?: number; fee?: number; slippage?: number; expiresAt?: string | undefined; basis?: number;
-  reason: string; source: string; live?: boolean | undefined; link?: string | undefined; report?: Report | undefined; status: "pending" | "queued" | "approved" | "rejected" | "expired"; createdAt: string; decidedAt?: string | undefined;
+  reason: string; source: string; live?: boolean | undefined; link?: string | undefined; report?: Report | undefined; status: "pending" | "queued" | "approved" | "rejected" | "expired"; createdAt: string; decidedAt?: string | undefined; rejectReason?: string; resizedFrom?: number;
 };
 export type LogEntry = { id: string; at: string; kind: "proposal" | "approved" | "rejected" | "refused" | "expired" | "monitor" | "agent" | "pause" | "resume" | "reset"; agentId?: string | undefined; message: string };
 export type Report = { summary: string; signals?: string[] | undefined; confidence: number; link?: string | undefined; live: boolean; verdict?: "BUY" | "HOLD" | "AVOID" | "SELL" | "NO CALL"; dataGaps?: string[]; reportId?: string; agreeing?: number; chart?: { label: string; points: number[] } | undefined; asset?: string; agent?: string; createdAt?: string; title?: string; evidence?: string[]; counter?: string[]; sources?: { label: string; url: string }[]; labels?: string[] };
 export type Msg = { id: string; at: string; role: "user" | "agent" | "system"; agentId?: string | undefined; kind: "text" | "card" | "refusal" | "alert"; text: string; proposalId?: string | undefined; report?: Report | undefined };
 export type Monitor = { id: string; name: string; kind: "ipo" | "crypto" | "social" | "asset"; symbol?: string | undefined; cron: string; human: string; nextRun: string; lastRun?: string | undefined; paused: boolean; seen: string[]; hits: number };
-export type Desk = { monitors?: Monitor[]; seen?: string[]; watch?: string[]; agents: Agent[]; proposals: Proposal[]; log: LogEntry[]; paused: boolean; messages?: Msg[] };
+export type PnlPoint = { t: string; value: number; pnl: number; invested: number };
+export type Desk = { pnlHistory?: PnlPoint[]; monitors?: Monitor[]; seen?: string[]; watch?: string[]; agents: Agent[]; proposals: Proposal[]; log: LogEntry[]; paused: boolean; messages?: Msg[] };
 
 type Preset = { label: string; strategy: string; universe: string[]; source: string };
 export const PRESETS = {
@@ -88,12 +98,25 @@ export async function writeDesk(fn: (d: Desk) => Desk | void | Promise<Desk | vo
     sweep(d);
     const r = (await fn(d)) ?? d;
     sweep(r);
+    recordPnl(r);
     r.log = r.log.slice(-200);
     r.messages = (r.messages ?? []).slice(-150);
     return r as unknown as Record<string, unknown>;
   });
   await flushReports();
   return out as unknown as Desk;
+}
+
+/** Append a P&L point (at most one per 30s, always after a fill). Marked at the same prices as the portfolio. */
+export function recordPnl(d: Desk, force = false) {
+  const h = (d.pnlHistory ??= []); const last = h[h.length - 1];
+  const fills = d.proposals.filter((p) => p.status === "approved").length;
+  if (!fills && !h.length) return;
+  const changed = !last || (last as PnlPoint & { fills?: number }).fills !== fills;
+  if (!force && !changed && Date.now() - Date.parse(last!.t) < 30_000) return;
+  const pf = portfolioOf(d);
+  h.push({ t: now(), value: pf.value, pnl: pf.pnl, invested: pf.invested, fills } as PnlPoint);
+  d.pnlHistory = h.slice(-240);
 }
 
 /** Public, shareable briefs live under their own global key so /r/<id> works without login. */
@@ -127,10 +150,14 @@ export const FEE_RATE = 0.001; // simulated 0.10% fee
 export const slipRate = (asset: string) => (CRYPTO.has(asset) ? 0.0015 : 0.0005); // simulated slippage
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
-/** Cap use = open buys (approved/pending/queued) minus cost basis released by approved sells. */
-export function spent(d: Desk, agentId: string) {
-  const buys = d.proposals.filter((p) => p.agentId === agentId && p.side !== "sell" && ["approved", "pending", "queued"].includes(p.status)).reduce((a, p) => a + p.cost, 0);
-  const released = d.proposals.filter((p) => p.agentId === agentId && p.side === "sell" && p.status === "approved").reduce((a, p) => a + (p.basis ?? 0), 0);
+/** Trading day in Africa/Lagos (UTC+1, no DST). The cap is a DAILY cap. */
+export const tradingDay = (iso: string | number = Date.now()) => new Date((typeof iso === "number" ? iso : Date.parse(iso)) + 3600_000).toISOString().slice(0, 10);
+/** Daily cap use = today's approved buys + every open (pending/queued) buy, minus cost basis released by today's approved sells. */
+export function spent(d: Desk, agentId: string, at = Date.now()) {
+  const day = tradingDay(at);
+  const isToday = (p: Proposal) => tradingDay(p.decidedAt ?? p.createdAt) === day;
+  const buys = d.proposals.filter((p) => p.agentId === agentId && p.side !== "sell" && (p.status === "pending" || p.status === "queued" || (p.status === "approved" && isToday(p)))).reduce((a, p) => a + p.cost, 0);
+  const released = d.proposals.filter((p) => p.agentId === agentId && p.side === "sell" && p.status === "approved" && isToday(p)).reduce((a, p) => a + (p.basis ?? 0), 0);
   return r2(Math.max(0, buys - released));
 }
 
@@ -168,7 +195,7 @@ function promote(d: Desk) {
 
 export type DecideResult = { ok: boolean; message: string; code?: string };
 /** Approve or reject. Expired or non-pending cards cannot be approved. */
-export function decide(d: Desk, idOrLatest: string | "latest", approve: boolean): DecideResult {
+export function decide(d: Desk, idOrLatest: string | "latest", approve: boolean, reason?: string): DecideResult {
   sweep(d);
   const p = idOrLatest === "latest" ? d.proposals.find((x) => x.status === "pending") : d.proposals.find((x) => x.id === idOrLatest);
   if (!p) return { ok: false, code: "none", message: "There's no pending card to " + (approve ? "approve." : "reject.") };
@@ -180,7 +207,9 @@ export function decide(d: Desk, idOrLatest: string | "latest", approve: boolean)
   p.status = approve ? "approved" : "rejected"; p.decidedAt = new Date().toISOString();
   if (approve && p.side === "sell") { const h = holdings(d).get(p.asset); p.basis = 0; if (h) { /* basis computed post-approval */ } }
   if (approve && p.side === "sell") { const before = holdings({ ...d, proposals: d.proposals.filter((x) => x.id !== p.id) }).get(p.asset); p.basis = before && before.qty ? r2((before.cost / before.qty) * p.qty) : 0; }
-  const msg = approve ? `Approved: ${p.side.toUpperCase()} ${p.qty} ${p.asset} at est. $${(p.estFill ?? p.price).toFixed(2)} for ${a?.name}. Paper fill recorded.` : `Rejected ${p.side} ${p.qty} ${p.asset} for ${a?.name}.${p.side === "buy" ? " Budget released." : ""}`;
+  const why = reason?.replace(/\s+/g, " ").trim().slice(0, 200);
+  if (!approve && why) { p.rejectReason = why; if (a) a.feedback = [...(a.feedback ?? []), { at: now(), asset: p.asset, reason: why }].slice(-20); }
+  const msg = approve ? `Approved: ${p.side.toUpperCase()} ${p.qty} ${p.asset} at est. $${(p.estFill ?? p.price).toFixed(2)} for ${a?.name}. Paper fill recorded.` : `Rejected ${p.side} ${p.qty} ${p.asset} for ${a?.name}.${p.side === "buy" ? " Budget released." : ""}${why ? ` Reason fed back to ${a?.name}: “${why}”. It will skip ${p.asset} on its next research round.` : ""}`;
   addLog(d, approve ? "approved" : "rejected", msg, p.agentId); post(d, { role: "agent", agentId: p.agentId, kind: "text", text: msg });
   promote(d);
   return { ok: true, message: msg };
@@ -229,12 +258,31 @@ export function proposeInto(d: Desk, input: ProposeInput): ProposeResult {
   return { ok: true, proposal, queued, remaining: side === "buy" ? r2(remaining - cost) : remaining };
 }
 
+export function portfolioOf(d: Desk) {
+  const at = Date.now();
+  const pos = [...holdings(d).values()].filter((x) => x.qty > 1e-9).map((x) => {
+    const last = simPrice(x.asset, at); const value = r2(last * x.qty);
+    return { asset: x.asset, qty: x.qty, live: isLive(x.asset), cost: r2(x.cost), avg: r2(x.cost / x.qty), last, value, pnl: r2(value - x.cost) };
+  });
+  const realized = r2([...holdings(d).values()].reduce((a, x) => a + x.realized, 0));
+  const invested = r2(pos.reduce((a, x) => a + x.cost, 0)), value = r2(pos.reduce((a, x) => a + x.value, 0));
+  return { positions: pos, invested, value, realized, pnl: r2(value - invested + realized) };
+}
+
+/** Stored P&L points plus a $0 baseline before the first fill and a live "now" point. */
+export function pnlSeries(d: Desk): PnlPoint[] {
+  const h = d.pnlHistory ?? []; if (!h.length) return [];
+  const pf = portfolioOf(d);
+  return [{ t: new Date(Date.parse(h[0]!.t) - 1000).toISOString(), value: 0, pnl: 0, invested: 0 }, ...h, { t: now(), value: pf.value, pnl: pf.pnl, invested: pf.invested }];
+}
+
 export function summarize(d: Desk) {
   const at = Date.now();
   const agents = d.agents.map((a) => {
     const used = spent(d, a.id);
     const pending = d.proposals.filter((p) => p.agentId === a.id && (p.status === "pending" || p.status === "queued")).length;
-    return { ...a, maxPerTrade: tradeMax(a), used, remaining: Math.round((a.budget - used) * 100) / 100, pending };
+    const held = r2(d.proposals.filter((p) => p.agentId === a.id && p.side !== "sell" && (p.status === "pending" || p.status === "queued")).reduce((s, p) => s + p.cost, 0));
+    return { ...a, maxPerTrade: tradeMax(a), used, held, filledToday: r2(Math.max(0, used - held)), remaining: Math.round((a.budget - used) * 100) / 100, pending, capPeriod: "daily (Africa/Lagos day)" };
   });
   const pos = [...holdings(d).values()].filter((x) => x.qty > 1e-9).map((x) => {
     const last = simPrice(x.asset, at); const value = r2(last * x.qty);
@@ -243,7 +291,7 @@ export function summarize(d: Desk) {
   const realized = r2([...holdings(d).values()].reduce((a, x) => a + x.realized, 0));
   const invested = pos.reduce((a, x) => a + x.cost, 0), value = pos.reduce((a, x) => a + x.value, 0);
   return {
-    paused: d.paused, agents,
+    paused: d.paused, agents, pnlHistory: pnlSeries(d), day: tradingDay(at),
     proposals: [...d.proposals].reverse().slice(0, 50),
     portfolio: { positions: pos, invested: Math.round(invested * 100) / 100, value: Math.round(value * 100) / 100, pnl: r2(value - invested + realized), realized, priceSource: pos.some((x) => isLive(x.asset)) ? "Marked at LIVE prices where available (CoinGecko / Yahoo); others SIMULATED" : "SIMULATED prices (deterministic, not market data)" },
     log: [...d.log].reverse().slice(0, 60),
@@ -253,4 +301,51 @@ export function summarize(d: Desk) {
     owner: deskOwner(),
     notice: "Paper trading only. No real money, no brokerage. Not financial advice.",
   };
+}
+
+/** Edit the size of the pending card before approving. Re-runs the same guards (per-trade max, daily cap, holdings) with this card's own reservation excluded. */
+export function resizeProposal(d: Desk, idOrLatest: string, size: { qty?: number | undefined; usd?: number | undefined }): DecideResult {
+  sweep(d);
+  const p = idOrLatest === "latest" ? d.proposals.find((x) => x.status === "pending") : d.proposals.find((x) => x.id === idOrLatest);
+  if (!p || p.status !== "pending") return { ok: false, code: "none", message: "Only the current pending card can be resized." };
+  const agent = d.agents.find((a) => a.id === p.agentId)!;
+  const unitCost = p.cost / p.qty;
+  let qty = size.qty ?? (size.usd ? size.usd / unitCost : 0);
+  qty = CRYPTO.has(p.asset) ? Math.round(qty * 1e6) / 1e6 : Math.round(qty * 1e4) / 1e4;
+  const fail = (code: string, m: string) => { addLog(d, "refused", m, agent.id); post(d, { role: "agent", agentId: agent.id, kind: "refusal", text: m }); return { ok: false, code, message: m }; };
+  if (!(qty > 0)) return fail("bad_size", "REFUSED: new size must be positive.");
+  const notional = r2((p.estFill ?? p.price) * qty); const fee = r2(Math.max(0.01, notional * FEE_RATE));
+  const cost = p.side === "buy" ? r2(notional + fee) : r2(notional - fee);
+  const prev = p.status; p.status = "rejected"; // exclude this card's own reservation while checking
+  const remaining = r2(agent.budget - spent(d, agent.id));
+  const free = Math.round((heldQty(d, p.asset) - reservedSell(d, p.asset)) * 1e6) / 1e6;
+  p.status = prev;
+  if (p.side === "sell") { if (qty > free + 1e-9) return fail("not_held", `REFUSED: you hold only ${free} ${p.asset} not already in a sell card.`); }
+  else if (cost > tradeMax(agent)) return fail("over_trade_max", `REFUSED: $${cost.toFixed(2)} is over ${agent.name}'s per-trade maximum of $${tradeMax(agent).toFixed(2)}.`);
+  else if (cost > remaining) return fail("over_cap", `REFUSED: $${cost.toFixed(2)} is over the $${remaining.toFixed(2)} left in ${agent.name}'s daily cap.`);
+  p.resizedFrom ??= p.qty; const old = p.qty;
+  p.qty = qty; p.fee = fee; p.cost = cost;
+  const m = `Resized: ${p.side.toUpperCase()} ${old} → ${qty} ${p.asset} (~$${cost.toFixed(2)}). Approve when ready.`;
+  addLog(d, "proposal", m, agent.id);
+  return { ok: true, message: m };
+}
+
+export type NewAgent = { name: string; strategy: string; budget?: number | undefined; maxPerTrade?: number | undefined; preset?: string | undefined };
+export const inferPreset = (s: string) => /crypto|btc|eth|sol\b|coin/i.test(s) ? "crypto" : /ipo|s-1|listing|stock|nasdaq/i.test(s) ? "ipo" : /congress|senat|house/i.test(s) ? "congress" : /\bx\b|twitter|account|social|@/i.test(s) ? "x-accounts" : "custom";
+/** Create a user agent from a plain-English strategy with its OWN cap. The same spent()/proposeInto guards apply to it. */
+export function createAgentInto(d: Desk, a: NewAgent): { ok: true; agent: Agent; message: string } | { ok: false; message: string } {
+  const name = a.name.trim().slice(0, 40); const strategy = a.strategy.trim().slice(0, 400);
+  if (!name || !strategy) return { ok: false, message: "An agent needs a name and a plain-English strategy." };
+  if (d.agents.some((x) => x.name.toLowerCase() === name.toLowerCase())) return { ok: false, message: `An agent called ${name} already exists.` };
+  if (d.agents.length >= 8) return { ok: false, message: "Desk limit: 8 agents." };
+  const budget = Math.round(a.budget ?? 500);
+  if (!(budget >= 10 && budget <= 10000)) return { ok: false, message: "Daily cap must be between $10 and $10,000 (paper)." };
+  const maxPerTrade = Math.round(a.maxPerTrade ?? budget / 2);
+  if (!(maxPerTrade >= 1 && maxPerTrade <= budget)) return { ok: false, message: "Per-trade max must be between $1 and the daily cap." };
+  const preset = a.preset ?? inferPreset(strategy);
+  const agent: Agent = { id: "ag_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name, preset, strategy, budget, maxPerTrade, createdAt: now(), custom: true };
+  d.agents.push(agent);
+  const message = `Created ${name} (${getPreset(preset).label} data) with a $${budget} daily cap and $${maxPerTrade} per-trade max — enforced by the same code as the built-in agents.`;
+  addLog(d, "agent", message, agent.id);
+  return { ok: true, agent, message };
 }

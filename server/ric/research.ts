@@ -1,4 +1,4 @@
-import { CRYPTO, post, publishReport, proposeInto, simPrice, tradeMax, writeDesk, type Agent, type Desk, type Report } from "./desk";
+import { CRYPTO, spent, tradingDay, post, publishReport, proposeInto, simPrice, tradeMax, writeDesk, type Agent, type Desk, type Report } from "./desk";
 import { analyze, coinMarkets, cryptoSeries, stockSeries, type Brief } from "./market";
 import { fetchPosts, socialThesis, DEFAULT_HANDLES } from "./social";
 import { stocksThesis } from "./stocks";
@@ -10,7 +10,9 @@ export function deliver(d: Desk, a: Agent, asset: string | undefined, b: Brief, 
   const report = toReport(b); report.chart = b.chart; publishReport(report, asset, a.name);
   const head = `${a.name}: ${b.verdict}${asset ? ` ${asset}` : ""} · confidence ${Math.round(b.confidence * 100)}%. ${b.summary}`;
   if (b.verdict !== "BUY" || !asset) { post(d, { role: "agent", agentId: a.id, kind: "alert", text: `Alert: ${head}`, report }); return `${b.verdict}${asset ? " " + asset : ""}`; }
-  const remaining = a.budget - d.proposals.filter((p) => p.agentId === a.id && p.status !== "rejected").reduce((s, p) => s + p.cost, 0);
+  const fb = (a.feedback ?? []).find((f) => f.asset === asset && tradingDay(f.at) === tradingDay());
+  if (fb) { post(d, { role: "agent", agentId: a.id, kind: "alert", text: `Alert: ${head} No card: you rejected ${asset} today (“${fb.reason}”), so ${a.name} is skipping it until tomorrow.`, report }); return `skipped ${asset} (your feedback)`; }
+  const remaining = a.budget - spent(d, a.id);
   const dollars = Math.max(10, Math.floor(Math.min(remaining, tradeMax(a)) * 0.3));
   const price = simPrice(asset);
   const qty = CRYPTO.has(asset) ? Math.round((dollars / price) * 1e6) / 1e6 : Math.max(1, Math.floor(dollars / price));
@@ -30,6 +32,7 @@ export async function thesisFor(a: Agent, d: Desk): Promise<{ asset?: string; br
     }
     return { ...t, label: `${mode === "live" ? "LIVE X" : "X SNAPSHOT"} · price ${t.asset && simPrice(t.asset) ? "live/sim" : ""}`.replace(" · price live/sim", "") };
   }
+  if (a.custom && getUniverse(a).length && /[A-Z]{2,5}/.test(a.strategy)) return analyzeAsset(getUniverse(a)[0]!, {});
   if (a.preset === "crypto") {
     const all = [];
     for (const sym of ["BTC", "ETH", "SOL", "XRP"]) all.push(await analyzeAsset(sym));
@@ -43,7 +46,11 @@ export async function thesisFor(a: Agent, d: Desk): Promise<{ asset?: string; br
   return analyzeAsset(getUniverse(a)[0]!, {});
 }
 
-const getUniverse = (a: Agent) => (a.preset === "congress" ? ["MSFT", "AAPL", "LMT"] : ["SPY", "QQQ", "AMZN"]);
+/** Tickers named in the agent's plain-English strategy come first (e.g. "buys ETH dips" → ETH). */
+export const getUniverse = (a: Agent) => {
+  const named = [...new Set((a.strategy.match(/\$?\b[A-Z]{2,5}\b/g) ?? []).map((x) => x.replace("$", "")).filter((x) => !/^(IPO|USD|AND|THE|ETF|RSI|SEC|AI|CEO|IF|OR)$/.test(x)))];
+  return named.length ? named : a.preset === "congress" ? ["MSFT", "AAPL", "LMT"] : ["SPY", "QQQ", "AMZN"];
+};
 
 export async function analyzeAsset(sym: string, ch: { ch7d?: number; ch30d?: number } = {}) {
   const S = sym.toUpperCase();

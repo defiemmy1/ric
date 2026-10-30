@@ -1,5 +1,5 @@
 /** Offline demo brain: a deterministic command interpreter over the same desk functions the actions use. */
-import { addLog, decide, heldQty, getPreset, post, proposeInto, simPrice, summarize, writeDesk, type Desk } from "./desk";
+import { addLog, resetDesk, createAgentInto, resizeProposal, decide, heldQty, getPreset, post, proposeInto, simPrice, summarize, writeDesk, type Desk } from "./desk";
 import { analyzeAsset, deliver, researchRound, thesisFor, toReport as deliverReport } from "./research";
 import { CRYPTO, isLive, readDesk } from "./desk";
 import { coinMarkets, cryptoSeries, stockSeries } from "./market";
@@ -47,10 +47,30 @@ function tradeClause(d: Desk, c: string, full: string) {
 
 const findAgent = (d: Desk, t: string) => d.agents.find((a) => new RegExp(`\\b${a.name.replace(/[^a-z0-9]/gi, ".?")}\\b`, "i").test(t));
 
+function createFromText(d: Desk, t: string): boolean {
+    const create = t.match(/create (?:an? )?(?:new )?agent (?:called |named )?["“]?([\w][\w &-]{0,30}?)["”]?(?:,| that| which| to| watching| for| with strategy:?|:)\s+(.+)/i);
+    if (create) {
+      let rest = create[2]!;
+      const capM = rest.match(/\$\s?([\d,]+)\s*(?:daily |a day |per day )?(?:cap|budget|limit)|(?:cap|budget|limit)(?: of)?\s*\$\s?([\d,]+)/i);
+      const maxM = rest.match(/\$\s?([\d,]+)\s*(?:max )?per[- ]trade|(?:max|maximum)\s*(?:of\s*)?\$\s?([\d,]+)/i);
+      const num = (m: RegExpMatchArray | null) => (m ? Number((m[1] ?? m[2])!.replace(/,/g, "")) : undefined);
+      rest = rest.replace(capM?.[0] ?? "\u0000", "").replace(maxM?.[0] ?? "\u0000", "").replace(/\s*(,|and|with)\s*(,|and|with)?\s*$/i, "").replace(/\s+(with|and)\s*$/i, "").trim();
+      const r = createAgentInto(d, { name: create[1]!.trim(), strategy: rest, budget: num(capM), maxPerTrade: num(maxM) });
+      say(d, r.ok ? r.message + ' Click its name for the strategy card, or say "run research".' : r.message, r.ok ? r.agent.id : undefined);
+      return true;
+    }
+    return false;
+}
+
 export async function handleMessage(text: string) {
   const t = text.trim();
   await writeDesk((d) => { post(d, { role: "user", kind: "text", text: t.slice(0, 500) }); });
   const low = t.toLowerCase();
+  if (/^(reset|reset (the )?(demo|desk)|start over)\b/.test(low)) { await resetDesk(); return { handled: "reset" }; }
+  if (/\bcreate (an? )?(new )?agent\b/i.test(t)) {
+    await writeDesk((d) => { if (!createFromText(d, t)) say(d, 'Try: create agent DipBuyer that buys ETH after a 5% drop, $300 cap, $100 per trade'); });
+    return { handled: "create" };
+  }
 
   if (/\b(research|scan|look for|find (me )?trades)\b/.test(low) && !/(every|hourly|daily|at \d)/.test(low)) {
     const r = await researchRound();
@@ -132,18 +152,12 @@ export async function handleMessage(text: string) {
   let handled = "help";
   await writeDesk((d) => {
     if (/^(yes|y|yep|approve|ok|okay|confirm|do it|go)\b/.test(low)) { handled = "approve"; const r = decide(d, "latest", true); if (!r.ok && r.code !== "expired") say(d, r.message); return; }
-    if (/^(no|n|nope|reject|deny|cancel|skip)\b/.test(low)) { handled = "reject"; const r = decide(d, "latest", false); if (!r.ok) say(d, r.message); return; }
-    if (/\b(resume|unpause|restart)\b/.test(low)) { handled = "resume"; d.paused = false; addLog(d, "resume", "Agents resumed."); return say(d, "Agents resumed. They can propose again."); }
-    if (/\b(pause|stop|halt|freeze)\b/.test(low)) { handled = "pause"; d.paused = true; addLog(d, "pause", "All agents paused by user."); return say(d, "All agents paused. The app now refuses every new proposal until you say resume."); }
-    const create = t.match(/create (?:an )?agent (\w[\w-]*)(?: watching| that watches| for)? (.+)/i);
-    if (create) {
-      handled = "create"; const s = create[2]!.toLowerCase();
-      const preset = /crypto|btc|eth|sol|coin/.test(s) ? "crypto" : /ipo|s-1|listing|stock/.test(s) ? "ipo" : /congress|senat|house/.test(s) ? "congress" : /\bx\b|twitter|account|social|@/.test(s) ? "x-accounts" : "custom";
-      const id = "ag_" + Date.now().toString(36);
-      d.agents.push({ id, name: create[1]!, preset, strategy: preset === "custom" ? create[2]! : getPreset(preset).strategy, budget: 500, maxPerTrade: 250, createdAt: new Date().toISOString() });
-      addLog(d, "agent", `Created agent ${create[1]} (${getPreset(preset).label}) with a $500 cap.`, id);
-      return say(d, `Created ${create[1]} (${getPreset(preset).label}) with a $500 cap and $250 per-trade max. Say "run research" to put it to work.`, id);
-    }
+    if (/^(no|n|nope|reject|deny|cancel|skip)\b/.test(low)) { handled = "reject"; const why = t.replace(/^\s*(no|n|nope|reject|deny|cancel|skip)\b[\s,.:;-]*(because|since|reason:?)?\s*/i, "").trim(); const r = decide(d, "latest", false, why || undefined); if (!r.ok) say(d, r.message); return; }
+    const rs = low.match(/^(?:resize|make it|change (?:the )?size to|change it to|size)\s*(?:to\s*)?(\$)?\s*([\d.]+)/);
+    if (rs) { handled = "resize"; const v = Number(rs[2]); const r = resizeProposal(d, "latest", rs[1] ? { usd: v } : { qty: v }); if (r.ok) { say(d, r.message); const p = d.proposals.find((x) => x.status === "pending"); if (p) post(d, { role: "agent", agentId: p.agentId, kind: "card", text: "Updated card.", proposalId: p.id }); } else if (r.code === "none") say(d, r.message); return; }
+    const creating = /\bcreate (an? )?(new )?agent\b/i.test(t);
+    if (!creating && /\b(resume|unpause|restart)\b/.test(low)) { handled = "resume"; d.paused = false; addLog(d, "resume", "Agents resumed."); return say(d, "Agents resumed. They can propose again."); }
+    if (!creating && /\b(pause|stop|halt|freeze)\b/.test(low)) { handled = "pause"; d.paused = true; addLog(d, "pause", "All agents paused by user."); return say(d, "All agents paused. The app now refuses every new proposal until you say resume."); }
     const clauses = t.split(/\s*(?:,|;|\band then\b|\bthen\b|\band\b)\s*(?=(?:buy|sell|close|get|purchase)\b)/i).filter(Boolean);
     let tradeClauses = clauses.filter((c) => /\b(buy|sell|close|purchase|long)\b/i.test(c));
     if (!tradeClauses.length && /ignore (your|the|its) (cap|limit)/i.test(t)) tradeClauses = [t];
