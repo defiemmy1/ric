@@ -109,7 +109,7 @@ export async function sweepMonitors() {
     for (const { key, value } of desks) {
       const owner = key.slice(DESK_PREFIX.length);
       const due = ((value as unknown as Desk).monitors ?? []).filter((m) => !m.paused && Date.parse(m.nextRun) <= Date.now());
-      for (const m of due) await withOwner(owner, () => runMonitor(m.id)).catch(() => null);
+      for (const m of due) await withOwner(owner, () => runMonitor(m.id)).catch((e) => console.error("[ric] monitor failed", m.id, String(e)));
     }
   } finally { running = false; }
 }
