@@ -47,6 +47,3 @@ Local dev uses embedded PGlite (`data/`, git-ignored).
 - Optional: `X_BEARER_TOKEN`, and a model connection (Builder.io / Anthropic / OpenAI key) for the full agent chat. Without one, chat runs in offline demo mode.
 
 No secrets are committed. `.env*` and `data/` are git-ignored.
-
-## Credits
-Built on the Agent-Native `chat` template (MIT). Inspired by [Adaam](https://github.com/Must-be-Ash/adaam). Built for the Builder.io Agent-Native Hackathon, 2026.
