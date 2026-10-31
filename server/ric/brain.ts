@@ -62,9 +62,9 @@ function createFromText(d: Desk, t: string): boolean {
     return false;
 }
 
-export async function handleMessage(text: string) {
+export async function handleMessage(text: string, opts: { skipUserPost?: boolean } = {}) {
   const t = text.trim();
-  await writeDesk((d) => { post(d, { role: "user", kind: "text", text: t.slice(0, 500) }); });
+  if (!opts.skipUserPost) await writeDesk((d) => { post(d, { role: "user", kind: "text", text: t.slice(0, 500) }); });
   const low = t.toLowerCase();
   if (/^(reset|reset (the )?(demo|desk)|start over)\b/.test(low)) { await resetDesk(); return { handled: "reset" }; }
   if (/\bcreate (an? )?(new )?agent\b/i.test(t)) {
@@ -72,9 +72,9 @@ export async function handleMessage(text: string) {
     return { handled: "create" };
   }
 
-  if (/\b(research|scan|look for|find (me )?trades)\b/.test(low) && !/(every|hourly|daily|at \d)/.test(low)) {
+  if ((/\b(research|scan|look for|find (me )?trades)\b/.test(low) || /what should i (buy|trade)|any (trade|idea)s?|what'?s good today/.test(low)) && !/(every|hourly|daily|at \d)/.test(low) && !/^research\s+\$?[a-z]{2,6}\s*\??$/i.test(t)) {
     const r = await researchRound();
-    await writeDesk((d) => say(d, `Research round done. ${r.results.map((x) => `${x.agent}: ${x.outcome}`).join(" · ")}. Tap "Read report" on any alert for the full brief.`));
+    await writeDesk((d) => say(d, `Done: ${r.results.length} briefs above. ${r.results.some((x) => /card/.test(x.outcome)) ? "A card is waiting for your approval." : "Nothing worth buying right now, so no cards."} Tap "Show evidence" on any brief.`));
     return { handled: "research" };
   }
   if (/\b(list|show|my)\s+monitors?\b|^monitors\??$/.test(low)) {
@@ -113,7 +113,7 @@ export async function handleMessage(text: string) {
     });
     return { handled: "watch" };
   }
-  const an = t.match(/\b(?:should i (?:buy|get)|analy[sz]e|thoughts on|what about|look at)\s+\$?([A-Za-z]{1,6})\b/i);
+  const an = t.match(/\b(?:should i (?:buy|get)|research|analy[sz]e|thoughts on|what about|look at)\s+\$?([A-Za-z]{1,6})\b/i);
   const sug = /suggest (a |me a )?crypto|crypto (trade|idea)/.test(low);
   if (an || sug) {
     const d0 = await readDesk();

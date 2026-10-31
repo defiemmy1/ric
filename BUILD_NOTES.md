@@ -80,3 +80,20 @@ Ric is one chat agent with three strategy agents. Each one writes a thesis shown
 - **Edit size:** `resizeProposal()` re-runs per-trade / cap / held checks excluding the card's own hold. Available as the `resize-proposal` action, `approve-proposal --qty/--usd`, an "Edit size" field on the card, and "make it $30" in chat.
 - **Denial reason:** `decide(..., reason)` logs it, stores it on `agent.feedback` (shown on the strategy card), and `deliver()` skips that asset for the rest of the day. Card UI has quick reasons; in chat, "no, too risky".
 - **Tests:** 22 total, including `tests/ric-caps.test.ts`: at-limit per-trade, pending/queued holds, independent agent caps, sell release + next-day reset, concurrent approvals fill once, concurrent proposals can't exceed the cap, resize, rejection feedback, custom agent caps, per-visitor desks + reset, dashboard numbers, and CoinGecko/Yahoo/Nasdaq failure → SIMULATED/SNAPSHOT labels (fetch mocked offline).
+
+## Agent mode is permanent (Oct 31, Lagos)
+- The Offline/Agent toggle is gone. `ChatDesk` checks `ensureAgentEngineReadiness()` / `subscribeAgentEngineReadiness()`. When it returns `configured`, the message is recorded in the desk thread (`send-message mode=record`) and sent to the agent with `sendToAgentChatAndConfirm`. The agent answers through the actions and ends with the new `post-reply` action (AGENTS.md says so).
+- **Automatic fallback** to `send-message mode=offline` (deterministic interpreter, user message not duplicated) when: no model is connected, the agent chat isn't delivered (8s), the call throws, or no reply lands in the thread within 90s. Fallback replies are tagged `via: offline-fallback` and show a small "offline fallback" label. The header pill shows "● Agent" or "○ Agent · offline fallback".
+- Local Builder.io connect fix: the box resolves external hosts to 198.18.0.1, which the framework's SSRF guard blocks. Set `AGENT_NATIVE_MCP_OAUTH_PRIVATE_ORIGINS` (builder.io origins only) in `.env.local`, which is git-ignored.
+- Verified with no model connected: "buy $20 SOL" → card + "offline fallback" label, no page errors. Agent path not yet exercised end to end (needs the Builder.io sign-in).
+
+## UX redesign (Oct 31, Lagos)
+- `ChatDesk.tsx` rewritten (logic and actions unchanged).
+  - **Empty state:** a one-line pitch, a 3-step explainer and 4 starter prompts. The brain now also understands "What should I buy today?" (research round) and "Research SOL" (one-asset brief).
+  - **Compact `Brief` cards:** verdict, confidence bar and a 2-line summary; "Show evidence" expands the tagged evidence, counterevidence, gaps and sources; "Full report" opens the modal.
+  - **Single approval card:** Deny / Approve / Edit size, with order details collapsed. Decided cards shrink to one line, and approve/deny echo texts are hidden because the card shows the outcome.
+  - **Less noise:** the seeded greeting is hidden, long texts are clamped with More, only the last 24 messages show (with a "Show earlier" button), and the offline-fallback label appears once per reply.
+  - **Desk panel:** portfolio + P&L chart + budget bars. Monitors, New agent and Activity log are collapsible sections. The panel can be hidden on desktop and is a slide-over on phones.
+  - **Feedback:** optimistic user bubble, typing indicator, spinners, and buttons disabled while pending; every action refetches the desk on completion.
+- Landing copy matches the new pitch and is mobile-sized.
+- Browser check (`/workspace/ric/shot/r1.mjs`), desktop 1440×900 and phone 390×844: every button passes (starters, order details, edit size, approve, research chip, show evidence, full report, deny with reason, more chips, monitor pause/resume/delete, new agent, strategy card, pause/resume, log, hide desk, reset, phone panel, typing "yes"). No page errors. The only console messages are from the template: a dev-only React warning about `root.tsx` theme scripts, and a 401 from the agent-engine status probe on the public landing page before sign-in.
