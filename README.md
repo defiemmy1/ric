@@ -7,6 +7,8 @@
 Ric is a chat-first agent desk built on [Agent-Native](https://www.agent-native.com). You message it to research crypto, stocks, IPOs and X accounts. Each answer is a research brief. A BUY or SELL becomes an exact-order Approve card. Nothing trades until you approve it, either with the button or by typing `yes`. No real money, no brokerage, and no keys are needed. Not financial advice.
 
 ## Features
+- **Clean chat-first UI** (cream / navy / orange). The empty state explains Ric in one line, shows a 3-step explainer (Ask → Approve → App keeps limits) and offers one-tap starter prompts. Briefs are compact cards with the verdict and confidence up front and the evidence collapsed. Each order is a single Approve / Deny / Edit card. The desk panel is collapsible, with advanced items (monitors, new agent, log) tucked into sections. Every button shows a pending state. Works on phones.
+- **Agent mode by default:** when an AI model is connected (Builder.io), every chat message goes to the Agent-Native AI agent, which calls the same Ric actions and posts its answer to the thread (`post-reply`). If no model is connected, the agent chat can't take the message, or the model doesn't answer within 90s, Ric's built-in deterministic interpreter answers instead and those replies carry a small **offline fallback** label. The demo keeps working either way.
 - **Chat desk** with three strategy agents: Social Signals (X), Crypto (CoinGecko) and Stocks & IPOs (Nasdaq + SEC EDGAR + quotes).
 - **Research briefs:**
   - The verdict and confidence come first.
@@ -34,7 +36,7 @@ Ric is a chat-first agent desk built on [Agent-Native](https://www.agent-native.
 Every capability is a single `defineAction` in `actions/` (for example `approve-proposal`, `reject-proposal`, `resize-proposal`, `propose-trade`, `sell-position`, `create-agent`, `create-monitor`, `reset-demo`). Agent-Native exposes each action three ways from that one definition:
 
 1. **UI:** the **Approve** button calls `useActionMutation("approve-proposal")`.
-2. **Chat:** typing **`yes`** goes through the chat interpreter (offline mode) or the AI agent (agent mode). Both end in the same `approve-proposal` path: `decide()` inside `writeDesk()`.
+2. **Chat:** typing **`yes`** goes to the AI agent (default), or to the offline interpreter as a fallback. Both end in the same `approve-proposal` path: `decide()` inside `writeDesk()`.
 3. **CLI / agent tools:** `pnpm action approve-proposal --id latest`.
 
 So the Approve button and typing `yes` are the same code, with the same guards. The guards live in plain TypeScript (`server/ric/desk.ts`: `proposeInto`, `resizeProposal`, `decide`, `spent`), not in a prompt. The model can only propose; the code decides whether a proposal may exist, and only the user can approve it.
@@ -74,6 +76,6 @@ Local dev uses embedded PGlite (`data/`, git-ignored). No secrets are committed.
 - `BETTER_AUTH_SECRET`: a random 32+ byte string.
 - `AUTH_DISABLED=1`: demo mode. There is no login; each visitor gets their own desk (anonymous browser cookie).
 - `AGENT_NATIVE_VERCEL_CRON_SCHEDULE="0 9 * * *"` (Hobby plan cron limit).
-- Optional: `X_BEARER_TOKEN`, and a model connection (Builder.io / Anthropic / OpenAI key) for the full agent chat. Without one, chat runs in offline demo mode.
+- Optional: `X_BEARER_TOKEN`, and a model connection (Builder.io / Anthropic / OpenAI key) for agent mode (the default). Without one, Ric answers with its built-in offline fallback.
 
 No secrets are committed. `.env*` and `data/` are git-ignored.
