@@ -244,12 +244,14 @@ export default function ChatDesk() {
     const at = Date.now(); setThinking(true);
     try {
       await send.mutateAsync({ text: m, mode: "record" } as never); await refetch?.(); setOptimistic(null);
-      const r = await sendToAgentChatAndConfirm({ message: `[Ric desk] ${m}`, submit: true, openSidebar: false } as never, { timeoutMs: 8000 });
-      if (!r.delivered) return offline(m, "agent chat unavailable", true);
+      // The agent panel lazy-loads: try in the background first, then open the panel so a composer is mounted to receive it.
+      let r = await sendToAgentChatAndConfirm({ message: `[Ric desk] ${m}`, submit: true, chatTarget: "local", openSidebar: false } as never, { timeoutMs: 10000 }).catch(() => ({ delivered: false }) as { delivered: boolean });
+      if (!r.delivered) r = await sendToAgentChatAndConfirm({ message: `[Ric desk] ${m}`, submit: true, chatTarget: "local", openSidebar: true } as never, { timeoutMs: 15000 }).catch(() => ({ delivered: false }) as { delivered: boolean });
+      if (!r.delivered) { console.warn("[ric] agent delivery failed", (r as any).reason); return offline(m, "agent chat unavailable", true); }
       setLastFallback("");
       if (waiting.current) clearTimeout(waiting.current.timer);
       waiting.current = { at, timer: setTimeout(() => { if (waiting.current?.at === at) { waiting.current = null; void offline(m, "model didn't answer", true); } }, 90_000) };
-    } catch { void offline(m, "model call failed", true); }
+    } catch (e) { console.warn("[ric] agent send threw", String(e)); void offline(m, "model call failed", true); }
   };
   const act = async (id: string, kind: Busy, fn: () => Promise<unknown>) => { setBusy({ id, kind }); try { await fn(); await refetch?.(); } finally { setBusy(null); } };
 
